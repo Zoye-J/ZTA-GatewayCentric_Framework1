@@ -1,17 +1,16 @@
 """
 Universal SSL Fix for Python 3.13 SAN bug
 Workaround for "Empty Subject Alternative Name extension" error
+WITH CONNECTION POOLING OPTIMIZATION
 """
 
 import ssl
 import os
-
+import socket
 import logging
-
 from pathlib import Path
 import requests
 from requests.adapters import HTTPAdapter
-
 
 # Add logging
 logger = logging.getLogger(__name__)
@@ -29,10 +28,6 @@ except ImportError:
 def create_fixed_ssl_context(verify_hostname=False):
     """
     Create SSL context that works around Python 3.13 SAN bug
-
-    Args:
-        verify_hostname: If True, verify hostnames (default False for localhost)
-
     """
     # Force TLSv1.2 to avoid Python 3.13 SAN bug
     context = ssl.SSLContext(ssl.PROTOCOL_TLS)
@@ -43,48 +38,61 @@ def create_fixed_ssl_context(verify_hostname=False):
     ca_cert = Path("certs/ca.crt")
     if ca_cert.exists():
         context.load_verify_locations(cafile=str(ca_cert))
-
         logger.info(f"✅ SSL fix: Loaded CA cert from {ca_cert}")
     else:
         logger.warning(f"⚠️ SSL fix: CA cert not found at {ca_cert}")
 
     # Enable certificate verification
     context.verify_mode = ssl.CERT_REQUIRED
-
-    # Only disable hostname checking for localhost
-    # This is the key fix - we still verify the certificate, just skip hostname match
     context.check_hostname = verify_hostname
 
     return context
 
 
 def create_ssl_fixed_session(verify_hostname=False):
-    """Create a requests Session with SSL fix applied"""
+    """Create a requests Session with SSL fix AND connection pooling"""
     session = requests.Session()
 
-    # Create custom adapter with fixed SSL context
+    # Create custom adapter with fixed SSL context AND pooling
     class FixedSSLAdapter(HTTPAdapter):
+        def __init__(self, **kwargs):
+            # Increase pool size and keep connections alive
+            kwargs.setdefault("pool_connections", 10)
+            kwargs.setdefault("pool_maxsize", 20)
+            kwargs.setdefault("max_retries", 0)
+            super().__init__(**kwargs)
+
         def init_poolmanager(self, *args, **kwargs):
-
             kwargs["ssl_context"] = create_fixed_ssl_context(verify_hostname)
-
+            # Keep connections alive across requests
+            kwargs["socket_options"] = [
+                (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1),
+            ]
             return super().init_poolmanager(*args, **kwargs)
 
     # Mount the adapter for all HTTPS requests
     session.mount("https://", FixedSSLAdapter())
 
+    # Set connection-level timeouts (connect, read)
+    session.timeout = (3, 30)
+
+    # Force HTTP/1.1 keep-alive
+    session.headers.update(
+        {"Connection": "keep-alive", "Keep-Alive": "timeout=30, max=100"}
+    )
+
+    logger.info("✅ Created SSL-fixed session with connection pooling")
     return session
 
 
-# Global SSL-fixed session
+# Global SSL-fixed session with pooling
 _ssl_fixed_session = None
 
 
 def get_ssl_fixed_session():
-    """Get or create SSL-fixed session"""
+    """Get or create SSL-fixed session with persistent connection pools"""
     global _ssl_fixed_session
     if _ssl_fixed_session is None:
-
         _ssl_fixed_session = create_ssl_fixed_session(verify_hostname=False)
         logger.info(
             "✅ Created global SSL-fixed session (hostname verification disabled)"
@@ -96,22 +104,13 @@ def get_ssl_fixed_session():
 def patch_requests_library():
     """
     Monkey-patch requests library to use SSL fix globally
-    WARNING: This affects ALL requests library usage
     """
     try:
-        # Store original methods
-        requests.original_get = requests.get
-        requests.original_post = requests.post
-        requests.original_put = requests.put
-        requests.original_delete = requests.delete
-        requests.original_request = requests.request
-
         # Get SSL-fixed session
         session = get_ssl_fixed_session()
 
         # Create patched methods
         def patched_request(method, url, **kwargs):
-            # Remove verify parameter as we use our SSL context
             kwargs.pop("verify", None)
             return session.request(method, url, **kwargs)
 
@@ -122,21 +121,41 @@ def patch_requests_library():
         requests.delete = lambda url, **kwargs: patched_request("DELETE", url, **kwargs)
         requests.request = patched_request
 
-        logger.info("✅ Successfully patched requests library for Python 3.13 SSL bug")
+        logger.info("Successfully patched requests library with connection pooling")
         return True
 
     except Exception as e:
         logger.error(f"⚠️ Failed to patch requests library: {e}")
-
         return False
 
 
-# Apply patch when module is imported
+# Add this new function alongside your existing ones
 
+
+def get_internal_session():
+    """
+    Session for localhost service-to-service calls.
+    Uses verify=False to skip certificate validation on loopback —
+    acceptable because loopback traffic never leaves the machine.
+    """
+    global _internal_session
+    if _internal_session is None:
+        s = requests.Session()
+        adapter = HTTPAdapter(pool_connections=10, pool_maxsize=20, max_retries=0)
+        s.mount("https://", adapter)
+        s.verify = False  # Skip cert validation on localhost
+        s.headers.update({"Connection": "keep-alive"})
+        _internal_session = s
+        logger.info("✅ Created fast internal session (no cert validation)")
+    return _internal_session
+
+
+_internal_session = None
+
+# Apply patch when module is imported
 patch_requests_library()
 
 
-# Export functions
 __all__ = [
     "create_fixed_ssl_context",
     "create_ssl_fixed_session",

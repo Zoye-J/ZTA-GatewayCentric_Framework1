@@ -42,6 +42,12 @@ class OpaAgent:
         self.opa_url = "https://localhost:8181"
         self.api_server_url = "https://localhost:5001"
 
+        # Cache session at instance level — avoid re-fetching on every call
+        from app.ssl_fix import get_ssl_fixed_session
+
+        self._session = get_ssl_fixed_session()
+        logger.info("✅ OPA Agent: SSL session cached at instance level")
+
     def _load_or_generate_keys(self):
         """Load existing keys or generate new ones AND SAVE THEM"""
         import os
@@ -177,17 +183,13 @@ class OpaAgent:
             # Prepare input for OPA
             opa_input = self._prepare_opa_input(request_data)
 
-            # USE THE SSL-FIXED SESSION instead of creating a new one
-            from app.ssl_fix import get_ssl_fixed_session
-
-            session = get_ssl_fixed_session()
+            session = self._session
 
             # The session already has proper SSL context
             response = session.post(
                 f"{self.opa_url}/v1/data/zta/allow",
                 json={"input": opa_input},
-                timeout=5,
-                # NO verify parameter - SSL context handles it
+                timeout=(2, 8),
             )
 
             if response.status_code == 200:
@@ -250,10 +252,7 @@ class OpaAgent:
                 f"Request headers: X-Service-Token present, X-Request-ID: {headers['X-Request-ID']}"
             )
 
-            # Use SSL-fixed session
-            from app.ssl_fix import get_ssl_fixed_session
-
-            session = get_ssl_fixed_session()
+            session = self._session
 
             # Make the request to API Server
             url = f"{self.api_server_url}{endpoint}"

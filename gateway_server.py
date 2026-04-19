@@ -402,5 +402,40 @@ if __name__ == "__main__":
         context.load_verify_locations("certs/ca.crt")
         context.verify_mode = ssl.CERT_OPTIONAL
 
+    # ============ ADD PRE-WARMING ============
+    import threading
+    import time
+
+    def prewarm_connections():
+        """Pre-establish SSL connections to all services"""
+        time.sleep(2)  # Wait for servers to start
+        try:
+            from app.ssl_fix import get_ssl_fixed_session
+
+            session = get_ssl_fixed_session()
+
+            services = [
+                ("https://localhost:8282/health", "OPA Agent"),
+                ("https://localhost:5001/health", "API Server"),
+                ("https://localhost:8181/health", "OPA Server"),
+            ]
+
+            for url, name in services:
+                try:
+                    start = time.time()
+                    response = session.get(url, timeout=5)
+                    elapsed = (time.time() - start) * 1000
+                    if response.status_code == 200:
+                        print(f"✅ Pre-warmed: {name} ({elapsed:.0f}ms)")
+                    else:
+                        print(f"⚠️ Pre-warm: {name} returned {response.status_code}")
+                except Exception as e:
+                    print(f"⚠️ Pre-warm failed for {name}: {e}")
+        except Exception as e:
+            print(f"⚠️ Pre-warm error: {e}")
+
+    # Start pre-warming thread
+    threading.Thread(target=prewarm_connections, daemon=True).start()
+    # ============ END PRE-WARMING ============
     # Run with proper SSL + mTLS
     app.run(host="0.0.0.0", port=5000, ssl_context=context, debug=True)

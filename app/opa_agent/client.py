@@ -181,7 +181,7 @@ class OpaAgentClient:
             response = self.session.post(
                 f"{self.agent_url}/evaluate",
                 json=payload,
-                timeout=30,
+                timeout=(3, 25),
                 # No verify parameter - SSL context handles it
             )
 
