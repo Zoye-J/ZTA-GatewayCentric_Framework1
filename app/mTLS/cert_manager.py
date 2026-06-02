@@ -14,7 +14,9 @@ from cryptography import x509
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
+from app.logs.zta_event_logger import event_logger, EventType, Severity
 from flask import current_app
+import requests
 import base64
 from app.logs.zta_event_logger import event_logger, EventType
 
@@ -311,6 +313,51 @@ subjectAltName = email:{email}
 
         except Exception as e:
             return False, f"Certificate validation error: {str(e)}"
+
+    def validate_certificate_with_crl(self, cert_pem, enforce_crl=True):
+        """
+        Validate certificate with mandatory CRL checking
+        """
+        # First, basic validation
+        is_valid, cert_info = self.validate_certificate(cert_pem)
+
+        if not is_valid:
+            return False, cert_info
+
+        # Now check CRL (REQUIRED)
+        if enforce_crl:
+            serial = cert_info.get("serial_number")
+            if self.is_certificate_revoked(serial):
+                # Log revocation check
+                event_logger.log_event(
+                    event_type=EventType.CERTIFICATE_REVOKED,
+                    source_component="cert_manager",
+                    action="Revoked certificate detected",
+                    details={
+                        "serial": serial,
+                        "fingerprint": cert_info.get("fingerprint", "")[:16],
+                    },
+                    severity=Severity.HIGH,
+                )
+                return False, "Certificate has been revoked"
+
+        return True, cert_info
+
+    # Also add automatic CRL refresh
+    def refresh_crl(self):
+        """Automatically refresh CRL from configured endpoint"""
+        crl_url = os.environ.get("CRL_URL", "")
+        if crl_url:
+            try:
+                response = requests.get(crl_url, timeout=10)
+                if response.status_code == 200:
+                    crl_data = response.json()
+                    crl_file = os.path.join(self.cert_dir, "crl.json")
+                    with open(crl_file, "w") as f:
+                        json.dump(crl_data, f)
+                    self.logger.info("CRL refreshed successfully")
+            except Exception as e:
+                self.logger.error(f"Failed to refresh CRL: {e}")
 
     def revoke_certificate(self, cert_pem):
         """Revoke a certificate (add to CRL)"""

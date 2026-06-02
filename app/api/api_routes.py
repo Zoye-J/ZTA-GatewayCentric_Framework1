@@ -9,11 +9,26 @@ from app.logs.zta_event_logger import event_logger, EventType, Severity
 from app.logs.request_tracker import log_request
 from app.logs.zta_event_logger import event_logger, EventType
 from datetime import datetime
+from functools import wraps
 import uuid
 import json
 
-
 api_bp = Blueprint("api", __name__)
+
+
+def require_service_token(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        service_token = request.headers.get("X-Service-Token")
+        expected_token = current_app.config.get("API_SERVICE_TOKEN")
+
+        if not service_token or service_token != expected_token:
+            # Allow localhost for internal calls
+            if request.remote_addr not in ["127.0.0.1", "::1"]:
+                return jsonify({"error": "Unauthorized"}), 401
+        return f(*args, **kwargs)
+
+    return decorated_function
 
 
 @api_bp.route("/documents", methods=["GET"])

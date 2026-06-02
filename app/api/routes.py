@@ -8,8 +8,24 @@ from cryptography import x509
 from cryptography.hazmat.backends import default_backend
 from app import db
 from app.models.user import GovernmentDocument, AccessLog, User
+from functools import wraps
 
 api_bp = Blueprint("api", __name__)
+
+
+def require_service_token(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        service_token = request.headers.get("X-Service-Token")
+        expected_token = current_app.config.get("API_SERVICE_TOKEN")
+
+        if not service_token or service_token != expected_token:
+            # Allow localhost for internal calls
+            if request.remote_addr not in ["127.0.0.1", "::1"]:
+                return jsonify({"error": "Unauthorized"}), 401
+        return f(*args, **kwargs)
+
+    return decorated_function
 
 
 # KEEP: Simple ZTA test endpoint (for gateway)
@@ -200,6 +216,7 @@ def test_zta_auth():
 
 # KEEP: Service health endpoint (for gateway)
 @api_bp.route("/service/health", methods=["GET"])
+@require_service_token
 @require_mtls  # Services only need mTLS
 def service_health():
     """Service health check - mTLS only (service-to-service)"""

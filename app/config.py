@@ -1,4 +1,5 @@
 import os
+import secrets
 from datetime import timedelta
 
 
@@ -86,7 +87,17 @@ class Config:
     }
 
     # JWT (Only for Gateway Server)
-    JWT_SECRET_KEY = os.environ.get("JWT_SECRET_KEY", "jwt-government-secure-key-2024")
+    _default_jwt_secret = secrets.token_urlsafe(32)
+    JWT_SECRET_KEY = os.environ.get("JWT_SECRET_KEY", _default_jwt_secret)
+    if not os.environ.get("JWT_SECRET_KEY"):
+        import warnings
+
+        warnings.warn(
+            "⚠️ JWT_SECRET_KEY not set in environment! Using randomly generated key. "
+            "This will break across server restarts. Set JWT_SECRET_KEY in production.",
+            RuntimeWarning,
+        )
+
     JWT_ACCESS_TOKEN_EXPIRES = timedelta(hours=8)
     JWT_REFRESH_TOKEN_EXPIRES = timedelta(days=30)
 
@@ -188,7 +199,7 @@ class Config:
 
 class DevelopmentConfig(Config):
     DEBUG = True
-    MTLS_ENABLED = False  # Disable mTLS in development for easier testing
+    MTLS_ENABLED = True
     LOG_LEVEL = "DEBUG"
     TRACING_ENABLED = True
     ENCRYPTION_ENABLED = True  # Enable encryption in development
@@ -197,6 +208,17 @@ class DevelopmentConfig(Config):
 class ProductionConfig(Config):
     DEBUG = False
     MTLS_ENABLED = True  # Enable mTLS in production
+
+    # ENSURE JWT secret is from environment ONLY - no fallback
+    @property
+    def JWT_SECRET_KEY(self):
+        secret = os.environ.get("JWT_SECRET_KEY")
+        if not secret:
+            raise ValueError(
+                "CRITICAL: JWT_SECRET_KEY must be set in environment variables in production!"
+            )
+        return secret
+
     JWT_COOKIE_SECURE = True
     JWT_COOKIE_SAMESITE = "Strict"
     LOG_LEVEL = "WARNING"

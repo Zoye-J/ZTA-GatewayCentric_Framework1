@@ -395,7 +395,7 @@ if __name__ == "__main__":
         ssl_context.verify_mode = ssl.CERT_NONE
 
     app.run(
-        host="0.0.0.0",
+        host="127.0.0.1",
         port=8282,
         ssl_context=ssl_context,
         debug=True,

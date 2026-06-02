@@ -447,8 +447,11 @@ class OpaAgent:
         # Check API Server
         try:
             response = requests.get(
-                f"{self.api_server_url}/health", timeout=3, verify=False
+                f"{self.api_server_url}/health",
+                timeout=3,
+                verify="/path/to/certs/ca.crt",
             )
+
             health["api_server"] = (
                 "healthy" if response.status_code == 200 else "unhealthy"
             )

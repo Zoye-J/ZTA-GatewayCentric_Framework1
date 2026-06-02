@@ -5,6 +5,9 @@ Forwards authorized requests to API server
 mTLS + HTTPS only - NO WebSockets
 """
 
+from dotenv import load_dotenv
+
+load_dotenv()
 
 try:
     from app import ssl_patch  # This applies the Python 3.13 SSL fix
@@ -19,7 +22,8 @@ import os
 from flask import render_template, g
 from app.mTLS.middleware import require_authentication
 from datetime import datetime
-
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -36,6 +40,8 @@ try:
     HAS_SSL_CONFIG = True
 except ImportError:
     HAS_SSL_CONFIG = False
+
+limiter = Limiter(key_func=get_remote_address)
 
 app = create_gateway_app()
 
@@ -365,6 +371,7 @@ def debug_opa_key():
 
 
 @app.route("/health", methods=["GET"])
+@limiter.limit("10 per minute")
 def health():
     """Health check"""
     return jsonify(
@@ -438,4 +445,4 @@ if __name__ == "__main__":
     threading.Thread(target=prewarm_connections, daemon=True).start()
     # ============ END PRE-WARMING ============
     # Run with proper SSL + mTLS
-    app.run(host="0.0.0.0", port=5000, ssl_context=context, debug=True)
+    app.run(host="127.0.0.1", port=5000, ssl_context=context, debug=True)

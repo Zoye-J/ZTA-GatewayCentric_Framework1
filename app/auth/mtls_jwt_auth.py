@@ -4,8 +4,9 @@ For Zero Trust Architecture
 """
 
 from flask import request, jsonify, current_app
+from app.logs.zta_event_logger import event_logger, EventType, Severity
 from functools import wraps
-from flask_jwt_extended import verify_jwt_in_request, get_jwt_identity
+from flask_jwt_extended import verify_jwt_in_request, get_jwt_identity, get_jwt
 import hashlib
 from cryptography import x509
 from datetime import datetime
@@ -69,56 +70,90 @@ class ZeroTrustAuthenticator:
             current_app.logger.error(f"Certificate error: {e}")
             return None
 
-    def authenticate_request(self):
-        """
-        Authenticate request using Zero Trust principles
-        Returns: (is_authenticated, identity, auth_method, error_message)
-        """
+    class ZeroTrustAuthenticator:
+        """Handles JWT + mTLS binding for Zero Trust"""
 
-        # 1. Extract client certificate (mTLS)
-        cert_identity = self.extract_certificate()
+        def authenticate_request(self, require_binding=True):
+            """
+            Authenticate request with STRONG binding between JWT and mTLS
 
-        if cert_identity:
-            # 2. Certificate is present (mTLS succeeded)
-            current_app.logger.info(f"mTLS certificate: {cert_identity}")
+            Args:
+                require_binding: If True, JWT and mTLS must match exactly
+            """
+            cert_identity = self.extract_certificate()
 
-            # 3. Check if this is a service or user
+            if not cert_identity:
+                return False, None, None, "mTLS certificate required"
+
+            # Service-to-service: only mTLS needed
             if cert_identity["type"] == "service":
-                # Service-to-service: Only mTLS required
                 return True, cert_identity, "mTLS_service", None
 
-            elif cert_identity["type"] == "user":
-                # User request: Need BOTH mTLS AND JWT
-                try:
-                    verify_jwt_in_request()
-                    jwt_user_id = get_jwt_identity()
+            # User request: REQUIRE JWT
+            try:
+                verify_jwt_in_request()  # ← No optional
+                jwt_user_id = get_jwt_identity()
 
-                    # Verify JWT user matches certificate user
-                    from app.models.user import User
+                from app.models.user import User
 
-                    user = User.query.get(jwt_user_id)
+                user = User.query.get(jwt_user_id)
 
-                    if user and user.email == cert_identity["email"]:
-                        # JWT and mTLS match - strong authentication
-                        return (
-                            True,
-                            {**cert_identity, "user_id": jwt_user_id, "user": user},
-                            "mTLS_JWT",
-                            None,
-                        )
-                    else:
-                        return (
-                            False,
-                            None,
-                            None,
-                            "JWT does not match certificate identity",
-                        )
+                if not user:
+                    return False, None, None, "JWT user not found"
 
-                except Exception as e:
-                    return False, None, None, f"JWT validation failed: {str(e)}"
+                # ============ STRONG BINDING ============
+                # Check 1: Email must match certificate
+                if require_binding and user.email != cert_identity.get("email"):
+                    self._log_binding_failure(user.email, cert_identity.get("email"))
+                    return (
+                        False,
+                        None,
+                        None,
+                        "JWT email does not match certificate email",
+                    )
 
-        # No certificate or authentication failed
-        return False, None, None, "Authentication required"
+                # Check 2: Certificate must be issued to this user
+                stored_fingerprint = user.certificate_fingerprint
+                if stored_fingerprint and stored_fingerprint != cert_identity.get(
+                    "fingerprint"
+                ):
+                    self._log_binding_failure("fingerprint mismatch", "")
+                    return False, None, None, "Certificate fingerprint mismatch"
+
+                # Check 3: JWT must have been issued after certificate was issued
+                # (Prevents using old JWT with new certificate)
+                jwt_claims = get_jwt()
+                jwt_issued_at = jwt_claims.get("iat", 0)
+                cert_issued_at = cert_identity.get("not_valid_before_timestamp", 0)
+
+                if jwt_issued_at < cert_issued_at:
+                    return (
+                        False,
+                        None,
+                        None,
+                        "JWT issued before certificate - possible replay attack",
+                    )
+
+                # All checks passed
+                return (
+                    True,
+                    {**cert_identity, "user_id": jwt_user_id, "user": user},
+                    "mTLS_JWT_BOUND",
+                    None,
+                )
+
+            except Exception as e:
+                return False, None, None, f"JWT required: {str(e)}"
+
+        def _log_binding_failure(self, expected, actual):
+            """Log binding failures for audit"""
+            event_logger.log_event(
+                event_type=EventType.SECURITY_VIOLATION,
+                source_component="zta_auth",
+                action="JWT-mTLS binding failed",
+                details={"expected": expected, "actual": actual},
+                severity=Severity.HIGH,
+            )
 
     def require_zta_auth(self, require_jwt_for_users=True):
         """

@@ -38,23 +38,21 @@ def verify_certificates():
     return True
 
 
-def create_server_ssl_context(verify_client=False, require_mtls=False):
+def create_server_ssl_context(
+    verify_client=False, require_mtls=False, server_side=True
+):
     """
     Create standardized SSL context for SERVER applications
-    (gateway_server.py, api_server.py, opa_agent_server.py, run_opa_server.py)
 
     Args:
         verify_client: Whether to verify client certificates
         require_mtls: Whether to require client certificates (mTLS)
-
-    Returns:
-        ssl.SSLContext configured for Python 3.13 compatibility
+        server_side: If True, disables check_hostname (only for client-side)
     """
     # Verify certificates exist first
     verify_certificates()
 
     # WORKAROUND FOR PYTHON 3.13 SSL BUG
-    # Use PROTOCOL_TLS and force TLSv1.2 only
     context = ssl.SSLContext(ssl.PROTOCOL_TLS)
 
     # CRITICAL: Force TLSv1.2 to avoid Python 3.13 bug
@@ -75,8 +73,9 @@ def create_server_ssl_context(verify_client=False, require_mtls=False):
     else:
         context.verify_mode = ssl.CERT_NONE
 
-    # We'll verify hostnames manually in our code
-    context.check_hostname = False
+    # CRITICAL: check_hostname must be False for server-side sockets
+    # This is only for client-side connections
+    context.check_hostname = False  # ← FIXED: Always False for servers
 
     # Modern, secure cipher suites
     context.set_ciphers(
@@ -87,11 +86,9 @@ def create_server_ssl_context(verify_client=False, require_mtls=False):
     )
 
     # Additional security settings
-    context.options |= (
-        ssl.OP_NO_TICKET
-    )  # Disable session tickets for better forward secrecy
-    context.options |= ssl.OP_SINGLE_DH_USE  # New Diffie-Hellman key for each handshake
-    context.options |= ssl.OP_SINGLE_ECDH_USE  # New ECDH key for each handshake
+    context.options |= ssl.OP_NO_TICKET
+    context.options |= ssl.OP_SINGLE_DH_USE
+    context.options |= ssl.OP_SINGLE_ECDH_USE
 
     return context
 
@@ -99,37 +96,27 @@ def create_server_ssl_context(verify_client=False, require_mtls=False):
 def create_client_ssl_context(verify_server=True, client_cert_path=None):
     """
     Create SSL context for CLIENT applications
-    (services calling other services - OPA Agent, API calls, etc.)
-
-    Args:
-        verify_server: Whether to verify server certificates
-        client_cert_path: Optional path to client certificate for mTLS
-
-    Returns:
-        ssl.SSLContext for client connections
+    For clients, check_hostname should be True (or False if testing)
     """
-    # Verify CA certificate exists
     if not CA_CERT.exists():
         raise FileNotFoundError(f"CA certificate not found: {CA_CERT}")
 
-    # WORKAROUND FOR PYTHON 3.13 SSL BUG
     context = ssl.SSLContext(ssl.PROTOCOL_TLS)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.maximum_version = ssl.TLSVersion.TLSv1_2
 
-    # Load CA certificate to trust our self-signed server
     context.load_verify_locations(cafile=str(CA_CERT))
 
     if verify_server:
         context.verify_mode = ssl.CERT_REQUIRED
-        context.check_hostname = False  # We verify manually
+        # For client-side, we CAN enable hostname verification
+        # But for localhost with self-signed certs, we'll keep it False for now
+        context.check_hostname = False  # Keep False for local development
     else:
         context.verify_mode = ssl.CERT_NONE
         context.check_hostname = False
 
-    # Load client certificate if provided (for mTLS)
     if client_cert_path and os.path.exists(client_cert_path):
-        # Assuming client cert and key are in same directory
         client_key = client_cert_path.with_suffix(".key")
         if client_key.exists():
             context.load_cert_chain(

@@ -44,7 +44,7 @@ def create_fixed_ssl_context(verify_hostname=False):
 
     # Enable certificate verification
     context.verify_mode = ssl.CERT_REQUIRED
-    context.check_hostname = verify_hostname
+    context.check_hostname = False
 
     return context
 
@@ -133,20 +133,17 @@ def patch_requests_library():
 
 
 def get_internal_session():
-    """
-    Session for localhost service-to-service calls.
-    Uses verify=False to skip certificate validation on loopback —
-    acceptable because loopback traffic never leaves the machine.
-    """
+    """Session for localhost service-to-service calls with PROPER verification"""
     global _internal_session
     if _internal_session is None:
         s = requests.Session()
         adapter = HTTPAdapter(pool_connections=10, pool_maxsize=20, max_retries=0)
         s.mount("https://", adapter)
-        s.verify = False  # Skip cert validation on localhost
+        # Use proper SSL context instead of verify=False
+        s.verify = str(Path("certs/ca.crt").absolute())  # ← Use CA cert
         s.headers.update({"Connection": "keep-alive"})
         _internal_session = s
-        logger.info("✅ Created fast internal session (no cert validation)")
+        logger.info("✅ Created internal session with proper CA verification")
     return _internal_session
 
 

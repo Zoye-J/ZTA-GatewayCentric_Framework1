@@ -3,20 +3,58 @@ OPA Agent Routes for Gateway Server
 Exposes OPA Agent endpoints through Gateway
 """
 
-from flask import Blueprint, jsonify, current_app
+from datetime import datetime
+from app.logs.zta_event_logger import event_logger, EventType, Severity
+import uuid
+from flask import Blueprint, jsonify, current_app, request
+from functools import wraps
 from datetime import datetime
 import uuid
+import os
+
+opa_agent_bp = Blueprint("opa_agent", __name__)
+
+
+def require_service_token(f):
+    """Require valid service token for internal endpoints"""
+
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        service_token = request.headers.get("X-Service-Token")
+        expected_token = current_app.config.get("OPA_AGENT_TOKEN")
+
+        if not service_token or service_token != expected_token:
+            # Also check if it's a localhost request (for development)
+            if request.remote_addr not in ["127.0.0.1", "localhost"]:
+                return (
+                    jsonify({"error": "Unauthorized - valid service token required"}),
+                    401,
+                )
+
+        return f(*args, **kwargs)
+
+    return decorated_function
+
 
 opa_agent_bp = Blueprint("opa_agent", __name__)
 
 
 @opa_agent_bp.route("/health", methods=["GET"])
+@require_service_token
 def opa_agent_health():
     """OPA Agent health check endpoint"""
     try:
         from app.opa_agent.client import get_opa_agent_client
 
         client = get_opa_agent_client()
+        # Log health check access
+        event_logger.log_event(
+            event_type=EventType.HEALTH_CHECK,
+            source_component="gateway",
+            action="Health check accessed",
+            details={"source_ip": request.remote_addr},
+            severity=Severity.INFO,
+        )
 
         if not client:
             return (
@@ -63,6 +101,7 @@ def opa_agent_health():
 
 
 @opa_agent_bp.route("/public-key", methods=["GET"])
+@require_service_token
 def get_opa_agent_public_key():
     """Get OPA Agent's public key"""
     try:
@@ -100,6 +139,7 @@ def get_opa_agent_public_key():
 
 
 @opa_agent_bp.route("/status", methods=["GET"])
+@require_service_token
 def opa_agent_status():
     """Get detailed OPA Agent status"""
     try:
@@ -141,6 +181,7 @@ def opa_agent_status():
 
 
 @opa_agent_bp.route("/encrypt-test", methods=["POST"])
+@require_service_token
 def encrypt_test():
     """Test encryption with OPA Agent"""
     try:

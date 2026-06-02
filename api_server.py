@@ -3,7 +3,8 @@ ZTA API Server - Business logic and database operations
 Only accepts requests from Gateway with valid service tokens
 Uses centralized SSL config
 """
-
+from dotenv import load_dotenv
+load_dotenv() 
 import sys
 import os
 
@@ -19,7 +20,6 @@ except ImportError:
 
 from app.logs.zta_event_logger import event_logger, EventType, Severity
 from app.api_app import create_api_app
-
 
 # Create the app
 app = create_api_app()
@@ -44,6 +44,7 @@ if __name__ == "__main__":
 
     app.run(
         debug=True,
+        host="127.0.0.1",
         port=app.config.get("API_SERVER_PORT", 5001),
         ssl_context=ssl_context,
         use_reloader=False,  # Add this to prevent socket issues
