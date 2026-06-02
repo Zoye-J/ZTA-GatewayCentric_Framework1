@@ -205,27 +205,49 @@ class DevelopmentConfig(Config):
     ENCRYPTION_ENABLED = True  # Enable encryption in development
 
 
+
 class ProductionConfig(Config):
     DEBUG = False
-    MTLS_ENABLED = True  # Enable mTLS in production
+    MTLS_ENABLED = True
 
-    # ENSURE JWT secret is from environment ONLY - no fallback
+    # ENSURE all service tokens come from environment - NO DEFAULTS
     @property
-    def JWT_SECRET_KEY(self):
-        secret = os.environ.get("JWT_SECRET_KEY")
-        if not secret:
+    def API_SERVICE_TOKEN(self):
+        token = os.environ.get("API_SERVICE_TOKEN")
+        if not token:
+            raise ValueError("CRITICAL: API_SERVICE_TOKEN must be set in environment!")
+        return token
+
+    @property
+    def GATEWAY_SERVICE_TOKEN(self):
+        token = os.environ.get("GATEWAY_SERVICE_TOKEN")
+        if not token:
             raise ValueError(
-                "CRITICAL: JWT_SECRET_KEY must be set in environment variables in production!"
+                "CRITICAL: GATEWAY_SERVICE_TOKEN must be set in environment!"
             )
-        return secret
+        return token
+
+    @property
+    def OPA_SERVICE_TOKEN(self):
+        token = os.environ.get("OPA_SERVICE_TOKEN")
+        if not token:
+            raise ValueError("CRITICAL: OPA_SERVICE_TOKEN must be set in environment!")
+        return token
+
+    @property
+    def OPA_AGENT_TOKEN(self):
+        token = os.environ.get("OPA_AGENT_TOKEN")
+        if not token:
+            raise ValueError("CRITICAL: OPA_AGENT_TOKEN must be set in environment!")
+        return token
 
     JWT_COOKIE_SECURE = True
     JWT_COOKIE_SAMESITE = "Strict"
     LOG_LEVEL = "WARNING"
-    SERVICE_MTLS_ENABLED = True  # Enable mTLS between services in production
+    SERVICE_MTLS_ENABLED = True
     RATE_LIMIT_ENABLED = True
     ENCRYPTION_ENABLED = True
-    NO_FALLBACK = True  # STRICT: No fallback in production
+    NO_FALLBACK = True
 
 
 class TestingConfig(Config):

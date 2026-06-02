@@ -219,15 +219,13 @@ class OpaAgent:
             return {"result": False, "reason": f"OPA Server unavailable: {str(e)}"}
 
     def call_api_server(self, request_info):
-        """Call API Server after OPA approval"""
+        """Call API Server after OPA approval - NO HARDCODES"""
         try:
-            # Extract the actual API endpoint and method
-            endpoint = request_info.get("endpoint")  # ← NO FALLBACK
+            endpoint = request_info.get("endpoint")
             method = request_info.get("method", "GET").upper()
             data = request_info.get("data")
             user_claims = request_info.get("user", {})
 
-            # CRITICAL: If no endpoint, this is an error - DENY ACCESS
             if not endpoint:
                 logger.error("No endpoint provided in request_info - DENYING ACCESS")
                 return {
@@ -238,20 +236,29 @@ class OpaAgent:
 
             logger.info(f"Calling API Server: {method} {endpoint}")
 
-            # Prepare headers for API Server - USE THE CORRECT SERVICE TOKEN
+            # ============ NO HARDCODES - Get token from environment only ============
+            import os
+
+            service_token = os.environ.get("API_SERVICE_TOKEN")
+            if not service_token:
+                logger.error("API_SERVICE_TOKEN not set in environment! Access DENIED.")
+                return {
+                    "status_code": 500,
+                    "error": "Service token not configured",
+                    "success": False,
+                }
+
             headers = {
                 "Content-Type": "application/json",
-                "X-Service-Token": "api-token-2024-zta",  # ← MUST match api_server.py
+                "X-Service-Token": service_token,
                 "X-Request-ID": request_info.get("request_id", "unknown"),
                 "X-User-Claims": json.dumps(user_claims),
                 "X-Forwarded-By": "OPA-Agent",
             }
 
-            # Log the headers (without sensitive data)
             logger.info(
-                f"Request headers: X-Service-Token present, X-Request-ID: {headers['X-Request-ID']}"
+                f"Using service token from environment (length: {len(service_token)})"
             )
-
             session = self._session
 
             # Make the request to API Server

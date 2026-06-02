@@ -4,6 +4,9 @@ Python OPA Server for ZTA Thesis - FIXED VERSION
 Serves as policy decision engine
 """
 
+from dotenv import load_dotenv
+
+load_dotenv()
 import sys
 import os
 import json
@@ -116,8 +119,11 @@ class OPAHandler(BaseHTTPRequestHandler):
         }
 
     def log_message(self, format, *args):
-        """Silence default logging"""
-        pass
+        """Log requests with timestamp"""
+        # Enable logging for debugging
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        message = format % args
+        print(f"[{timestamp}] {self.address_string()} - {message}")
 
 
 def run_opa_server():

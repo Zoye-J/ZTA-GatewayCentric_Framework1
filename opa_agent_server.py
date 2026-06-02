@@ -3,7 +3,8 @@ OPA Agent Server with Encryption - FIXED VERSION
 Runs on Port 8282
 Uses centralized SSL config
 """
-
+from dotenv import load_dotenv
+load_dotenv()  
 from flask import Flask, request, jsonify, g
 from app.opa_agent.agent import OpaAgent
 import uuid

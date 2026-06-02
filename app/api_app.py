@@ -3,6 +3,7 @@
 API Server Flask App Factory
 """
 
+import os
 from flask import Flask, request, jsonify, g
 import json
 import uuid
@@ -26,8 +27,7 @@ def create_api_app(config_name="development"):
     app.config.from_object(ConfigClass)
 
     # Initialize extensions
-    db.init_app(app)  # This is from api_models
-    # Enable CORS
+    db.init_app(app)
     cors.init_app(app, origins=["https://localhost:5000", "http://localhost:5000"])
 
     # Handle OPTIONS requests
@@ -43,6 +43,45 @@ def create_api_app(config_name="development"):
         )
         response.headers.add("Access-Control-Allow-Credentials", "true")
         return response
+
+    # ======== ADD MIDDLEWARE (MUST BE BEFORE REGISTERING BLUEPRINTS) ========
+    API_SERVICE_TOKEN = os.environ.get("API_SERVICE_TOKEN")
+    if not API_SERVICE_TOKEN:
+        raise ValueError("CRITICAL: API_SERVICE_TOKEN environment variable not set!")
+
+    @app.before_request
+    def verify_service_token():
+        """Middleware to verify service token from Gateway"""
+        # Allow CORS preflight OPTIONS requests
+        if request.method == "OPTIONS":
+            return
+
+        # Allow health endpoint (defined later, but we check by path)
+        if request.path == "/health":
+            return
+
+        service_token = request.headers.get("X-Service-Token")
+        if not service_token or service_token != API_SERVICE_TOKEN:
+            print(
+                f"❌ Token validation failed. Expected length: {len(API_SERVICE_TOKEN)}, "
+                f"Got length: {len(service_token) if service_token else 0}"
+            )
+            return (
+                jsonify(
+                    {
+                        "error": "Invalid service token",
+                        "zta_context": {"server": "api_server"},
+                    }
+                ),
+                401,
+            )
+
+        # Extract user claims from gateway
+        user_claims_json = request.headers.get("X-User-Claims")
+        if user_claims_json:
+            g.user_claims = json.loads(user_claims_json)
+
+        g.request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
 
     # Register API blueprints
     from app.api.api_routes import api_bp
@@ -62,24 +101,20 @@ def create_api_app(config_name="development"):
             user_clearance = user_claims.get("clearance_level", "BASIC")
             current_hour = datetime.now().hour
 
-            # Get all non-archived documents
             documents = GovernmentDocument.query.filter_by(is_archived=False).all()
 
-            # Map database classifications to tier names
             classification_map = {
                 "PUBLIC": "PUBLIC",
                 "DEPARTMENT": "DEPARTMENT",
                 "TOP_SECRET": "TOP_SECRET",
-                "CONFIDENTIAL": "DEPARTMENT",  # If you have this
-                "SECRET": "DEPARTMENT",  # If you have this
+                "CONFIDENTIAL": "DEPARTMENT",
+                "SECRET": "DEPARTMENT",
             }
 
-            # Filter resources based on department and clearance
             filtered_resources = []
             for doc in documents:
                 tier = classification_map.get(doc.classification, "PUBLIC")
 
-                # Apply access rules
                 if tier == "PUBLIC":
                     filtered_resources.append(
                         {
@@ -101,7 +136,6 @@ def create_api_app(config_name="development"):
                         }
                     )
                 elif tier == "TOP_SECRET" and doc.department == user_department:
-                    # Check clearance and time
                     if user_clearance in ["SECRET", "TOP_SECRET"]:
                         if 8 <= current_hour < 16:
                             filtered_resources.append(
@@ -114,7 +148,6 @@ def create_api_app(config_name="development"):
                                 }
                             )
                         else:
-                            # Show as restricted
                             filtered_resources.append(
                                 {
                                     "id": doc.id,
@@ -146,8 +179,6 @@ def create_api_app(config_name="development"):
                 500,
             )
 
-    # ======== END RESOURCES ENDPOINT ========
-
     app.register_blueprint(auth_bp, url_prefix="/api/auth")
     app.register_blueprint(registration_bp, url_prefix="/api/register")
     app.register_blueprint(api_bp, url_prefix="/api")
@@ -163,43 +194,6 @@ def create_api_app(config_name="development"):
                 "timestamp": datetime.utcnow().isoformat(),
             }
         )
-
-    # ======== END HEALTH ENDPOINT ========
-
-    # ======== ADD MIDDLEWARE ========
-    API_SERVICE_TOKEN = app.config.get("API_SERVICE_TOKEN", "api-token-2024-zta")
-
-    @app.before_request
-    def verify_service_token():
-        """Middleware to verify service token from Gateway"""
-        # Allow CORS preflight OPTIONS requests
-        if request.method == "OPTIONS":
-            return
-
-        # Allow health endpoint
-        if request.endpoint == "health":
-            return
-
-        service_token = request.headers.get("X-Service-Token")
-        if not service_token or service_token != API_SERVICE_TOKEN:
-            return (
-                jsonify(
-                    {
-                        "error": "Invalid service token",
-                        "zta_context": {"server": "api_server"},
-                    }
-                ),
-                401,
-            )
-
-        # Extract user claims from gateway
-        user_claims_json = request.headers.get("X-User-Claims")
-        if user_claims_json:
-            g.user_claims = json.loads(user_claims_json)
-
-        g.request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
-
-    # ======== END MIDDLEWARE ========
 
     # Create tables
     with app.app_context():
