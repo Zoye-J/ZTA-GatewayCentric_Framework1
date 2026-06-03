@@ -18,10 +18,8 @@ import os
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
 
-
 # Apply SSL fix - get the fixed session
 from app.ssl_fix import get_ssl_fixed_session
-
 
 # Apply SSL fix BEFORE any imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -167,22 +165,35 @@ class OpaAgentClient:
     def send_to_agent(self, encrypted_data, user_public_key, request_id=None):
         """Send encrypted request to OPA Agent - NO FALLBACKS, PURE SSL"""
 
+        # Get the service token for OPA Agent
+        from flask import current_app
+
+        service_token = current_app.config.get(
+            "GATEWAY_SERVICE_TOKEN", "gateway-token-2024-zta"
+        )
+
         payload = {
             "encrypted_request": encrypted_data,
             "user_public_key": user_public_key,
             "request_id": request_id or "no-id",
         }
 
-        try:
+        # Headers with service token
+        headers = {
+            "Content-Type": "application/json",
+            "X-Service-Token": service_token,  # ← ADD THIS
+            "X-Request-ID": request_id or "no-id",
+        }
 
+        try:
             logger.info(f"[{request_id}] 📡 Sending to OPA Agent")
 
-            # Use SSL-fixed session - NO FALLBACKS
+            # Use SSL-fixed session with headers
             response = self.session.post(
                 f"{self.agent_url}/evaluate",
                 json=payload,
+                headers=headers,  # ← ADD THIS
                 timeout=(3, 25),
-                # No verify parameter - SSL context handles it
             )
 
             if response.status_code == 200:
@@ -199,19 +210,16 @@ class OpaAgentClient:
 
         except requests.exceptions.SSLError as ssl_error:
             logger.error(f"[{request_id}] ❌ SSL Error: {ssl_error}")
-            # ZERO TRUST: DENY ACCESS - NO FALLBACK
             return {
                 "access_denied": True,
                 "reason": "SSL verification failed - secure connection required",
             }
-
         except requests.exceptions.ConnectionError as conn_error:
             logger.error(f"[{request_id}] ❌ Connection Error: {conn_error}")
             return {
                 "access_denied": True,
                 "reason": "OPA Agent unavailable - connection refused",
             }
-
         except Exception as e:
             logger.error(f"[{request_id}] ❌ Unexpected error: {e}")
             return {"access_denied": True, "reason": f"Internal error: {str(e)}"}

@@ -83,16 +83,25 @@ class EncryptedServiceCommunicator:
         )
 
     def _make_ssl_request(self, method, url, **kwargs):
-        """Make request with SSL fix applied"""
+        """Make request with SSL fix and service token"""
+
+        # Ensure service token is always present for internal calls
+        if "headers" not in kwargs:
+            kwargs["headers"] = {}
+
+        # ONLY add service token if not already present
+        # This prevents overriding the token we set in _handle_direct_resource_call
+        if "X-Service-Token" not in kwargs["headers"]:
+            kwargs["headers"]["X-Service-Token"] = current_app.config.get(
+                "GATEWAY_SERVICE_TOKEN", "gateway-token-2024-zta"
+            )
+
         try:
-            # Remove verify parameter as we use our SSL context
             kwargs.pop("verify", None)
             return self.session.request(method, url, **kwargs)
         except Exception as e:
             logger.error(f"SSL request failed: {e}")
-            # Fallback to regular requests with verify=False
-            kwargs["verify"] = False
-            return requests.request(method, url, **kwargs)
+            return None
 
     def process_encrypted_request(self, flask_request, user_claims):
         """
@@ -341,15 +350,34 @@ class EncryptedServiceCommunicator:
             # Build URL
             api_url = f"{self.api_server_url}{flask_request.path}"
 
-            # Prepare headers
+            api_service_token = current_app.config.get(
+                "API_SERVICE_TOKEN", "api-token-2024-zta"
+            )
+            logger.info(f"[{request_id}] Using API_SERVICE_TOKEN: {api_service_token}")
+
+            # ============ FIX: Use the correct service token ============
+            # The API Server expects API_SERVICE_TOKEN, not GATEWAY_SERVICE_TOKEN
+            api_service_token = current_app.config.get(
+                "API_SERVICE_TOKEN", "api-token-2024-zta"
+            )
+
+            # Also ensure OPA_AGENT_TOKEN is available if needed
+            opa_agent_token = current_app.config.get(
+                "OPA_AGENT_TOKEN", "opa-agent-token-2024-zta"
+            )
+
+            # Prepare headers with CORRECT service token
             headers = {
                 "Content-Type": "application/json",
-                "X-Service-Token": current_app.config.get(
-                    "API_SERVICE_TOKEN", "api-token-2024-zta"
-                ),
+                "X-Service-Token": api_service_token,  # ← FIXED: Use API_SERVICE_TOKEN
                 "X-User-Claims": json.dumps(user_claims),
                 "X-Request-ID": request_id,
             }
+
+            # Log the token being used (first few chars for debugging)
+            logger.info(
+                f"[{request_id}] Using service token: {api_service_token[:20]}..."
+            )
 
             # Make request with SSL fix
             if flask_request.method == "POST":
@@ -371,7 +399,7 @@ class EncryptedServiceCommunicator:
                     "GET", api_url, headers=headers, timeout=10
                 )
 
-            if response.status_code == 200:
+            if response and response.status_code == 200:
                 data = response.json()
                 logger.info(f"[{request_id}] ✅ Direct API call successful")
 
@@ -386,13 +414,23 @@ class EncryptedServiceCommunicator:
 
                 return jsonify(data), response.status_code
             else:
-                logger.error(
-                    f"[{request_id}] ❌ Direct API error: {response.status_code}"
+                status = response.status_code if response else "No response"
+                logger.error(f"[{request_id}] ❌ Direct API error: {status}")
+                if response:
+                    try:
+                        error_data = response.json()
+                        logger.error(f"[{request_id}] Error details: {error_data}")
+                    except:
+                        logger.error(f"[{request_id}] Error text: {response.text}")
+                return self._create_error_response(
+                    500, f"API Server error: {status}", request_id
                 )
-                return jsonify(response.json()), response.status_code
 
         except Exception as e:
             logger.error(f"[{request_id}] ❌ Direct API call failed: {e}")
+            import traceback
+
+            traceback.print_exc()
             return self._create_error_response(
                 500, f"Direct API failed: {str(e)}", request_id
             )

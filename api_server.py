@@ -3,8 +3,10 @@ ZTA API Server - Business logic and database operations
 Only accepts requests from Gateway with valid service tokens
 Uses centralized SSL config
 """
+
 from dotenv import load_dotenv
-load_dotenv() 
+
+load_dotenv()
 import sys
 import os
 
@@ -12,7 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # Import centralized SSL config
 try:
-    from app.ssl_config import create_ssl_context
+    from app.ssl_config import create_server_ssl_context  # ← CHANGE THIS
 
     HAS_SSL_CONFIG = True
 except ImportError:
@@ -37,7 +39,7 @@ if __name__ == "__main__":
 
     # Use centralized SSL config if available
     if HAS_SSL_CONFIG:
-        ssl_context = create_ssl_context(verify_client=False)
+        ssl_context = create_server_ssl_context(verify_client=False)
     else:
         # Fallback
         ssl_context = ("certs/server.crt", "certs/server.key")

@@ -3,8 +3,10 @@ OPA Agent Server with Encryption - FIXED VERSION
 Runs on Port 8282
 Uses centralized SSL config
 """
+
 from dotenv import load_dotenv
-load_dotenv()  
+
+load_dotenv()
 from flask import Flask, request, jsonify, g
 from app.opa_agent.agent import OpaAgent
 import uuid
@@ -13,6 +15,7 @@ import logging
 import ssl
 from app.logs.zta_event_logger import event_logger, EventType, Severity
 import json
+from functools import wraps
 
 # Import centralized SSL config
 try:
@@ -29,32 +32,110 @@ logger = logging.getLogger(__name__)
 
 def create_opa_agent_app():
     """Create OPA Agent Flask application"""
-    flask_app = Flask(__name__)  # Changed variable name from app to flask_app
+    app = Flask(__name__)  # ← CHANGE: Use 'app' consistently
     agent = OpaAgent()
 
-    @flask_app.before_request
+    # Get service tokens from config
+    GATEWAY_SERVICE_TOKEN = os.environ.get(
+        "GATEWAY_SERVICE_TOKEN", "gateway-token-2024-zta"
+    )
+
+    @app.before_request
     def setup_request():
         """Setup request context"""
         g.request_id = str(uuid.uuid4())
         g.agent = agent
 
-    @flask_app.route("/health", methods=["GET"])
+    @app.before_request
+    def block_direct_access():
+        """Block all requests not coming from Gateway"""
+
+        # Only Gateway should call OPA Agent
+        allowed_tokens = [GATEWAY_SERVICE_TOKEN]
+
+        # Health endpoint - restrict to localhost only
+        if request.path == "/health":
+            # Only allow from localhost or with service token
+            if request.remote_addr in ["127.0.0.1", "::1"]:
+                return None
+
+            service_token = request.headers.get("X-Service-Token")
+            if service_token and service_token in allowed_tokens:
+                return None
+
+            print(f"[SECURITY] Blocked health check from {request.remote_addr}")
+            return jsonify({"error": "Unauthorized"}), 401
+
+        # Public key endpoint - restrict to Gateway only
+        if request.path == "/public-key":
+            service_token = request.headers.get("X-Service-Token")
+            if not service_token or service_token not in allowed_tokens:
+                print(
+                    f"[SECURITY] Blocked public-key access from {request.remote_addr}"
+                )
+                return jsonify({"error": "Unauthorized - Gateway only"}), 401
+            return None
+
+        # Evaluate endpoint - Gateway only
+        if request.path == "/evaluate":
+            service_token = request.headers.get("X-Service-Token")
+            if not service_token or service_token not in allowed_tokens:
+                print(f"[SECURITY] Blocked evaluate access from {request.remote_addr}")
+                return jsonify({"error": "Unauthorized - Gateway only"}), 401
+            return None
+
+        # Block all other direct access
+        print(
+            f"[SECURITY] Blocked direct access to {request.path} from {request.remote_addr}"
+        )
+        return jsonify({"error": "Access Denied - Use ZTA Gateway"}), 403
+
+    # Note: The decorator below is not used because middleware handles auth
+    # Keeping it for reference but not applying to routes
+
+    @app.route("/health", methods=["GET"])
     def health():
-        """Health check endpoint"""
-        return (
-            jsonify(
-                {
-                    "status": "healthy",
-                    "service": "OPA Agent",
-                    "port": 8282,
-                    "encryption": "RSA-2048",
-                    "public_key_available": bool(agent.get_public_key()),
-                }
-            ),
-            200,
+        """Health check endpoint - requires service token or localhost"""
+        # Check if from localhost
+        if request.remote_addr in ["127.0.0.1", "::1"]:
+            return (
+                jsonify(
+                    {
+                        "status": "healthy",
+                        "service": "OPA Agent",
+                        "port": 8282,
+                        "encryption": "RSA-2048",
+                        "public_key_available": bool(agent.get_public_key()),
+                    }
+                ),
+                200,
+            )
+
+        # Check service token
+        service_token = request.headers.get("X-Service-Token")
+        expected_token = os.environ.get(
+            "GATEWAY_SERVICE_TOKEN", "gateway-token-2024-zta"
         )
 
-    @flask_app.route("/evaluate", methods=["POST"])
+        if service_token and service_token == expected_token:
+            return (
+                jsonify(
+                    {
+                        "status": "healthy",
+                        "service": "OPA Agent",
+                        "port": 8282,
+                        "encryption": "RSA-2048",
+                        "public_key_available": bool(agent.get_public_key()),
+                    }
+                ),
+                200,
+            )
+
+        # Block all others
+        print(f"[SECURITY] Unauthorized health check from {request.remote_addr}")
+        return jsonify({"error": "Unauthorized"}), 401
+
+    @app.route("/evaluate", methods=["POST"])
     def evaluate():
         """
         Main endpoint: Receive encrypted request, process, return encrypted response
@@ -66,16 +147,18 @@ def create_opa_agent_app():
             "request_id": "optional_id"
         }
         """
+        trace_id = None  # Initialize for error handling
         try:
             data = request.json
             request_id = data.get("request_id", g.request_id)
 
-            # ADD: Get trace ID from headers or generate
+            # Get trace ID from headers or generate
             trace_id = request.headers.get(
                 "X-Trace-ID", f"opa_{int(uuid.uuid4().int % 1000000)}"
             )
 
             logger.info(f"[{request_id}] OPA Agent received request")
+
             # DEBUG: Log what we received
             logger.info(
                 f"[{request_id}] Encrypted data length: {len(data.get('encrypted_request', ''))}"
@@ -92,7 +175,6 @@ def create_opa_agent_app():
                 f"[{request_id}] Encrypted data (first 100): {encrypted_request[:100]}"
             )
 
-            # ============ ADD EVENT LOGGING HERE ============
             # Log when OPA Agent receives request
             event_logger.log_event(
                 event_type=EventType.REQUEST_RECEIVED,
@@ -106,9 +188,6 @@ def create_opa_agent_app():
                 },
                 severity=Severity.INFO,
             )
-
-            # Step 1: Decrypt request with agent's private key
-            encrypted_request = data["encrypted_request"]
 
             # Log before decryption
             event_logger.log_event(
@@ -152,8 +231,10 @@ def create_opa_agent_app():
                 details={
                     "request_id": request_id,
                     "method": request_info.get("method", "Unknown"),
-                    "path": request_info.get("path", "Unknown"),
-                    "user_id": request_info.get("user_id", "Unknown"),
+                    "path": request_info.get(
+                        "endpoint", "Unknown"
+                    ),  # ← FIXED: use "endpoint"
+                    "user_id": request_info.get("user", {}).get("id", "Unknown"),
                 },
                 severity=Severity.INFO,
             )
@@ -169,16 +250,14 @@ def create_opa_agent_app():
                 trace_id=trace_id,
                 details={
                     "request_id": request_id,
-                    "allowed": opa_result.get(
-                        "result", False
-                    ),  # ✅ FIXED: use "result"
+                    "allowed": opa_result.get("result", False),
                     "reason": opa_result.get("reason", "No reason provided"),
                 },
                 severity=Severity.INFO,
             )
 
             # Step 4: Check if access is allowed
-            if not opa_result.get("result", False):  # ✅ FIXED: use "result"
+            if not opa_result.get("result", False):
                 # Access denied - still encrypt response
                 response_data = {
                     "allowed": False,
@@ -192,12 +271,12 @@ def create_opa_agent_app():
                     source_component="opa_agent",
                     action=f"Access DENIED by policy",
                     trace_id=trace_id,
-                    user_id=request_info.get("user_id"),
-                    username=request_info.get("username"),
+                    user_id=request_info.get("user", {}).get("id"),
+                    username=request_info.get("user", {}).get("username"),
                     details={
                         "request_id": request_id,
                         "reason": opa_result.get("reason", "Access denied"),
-                        "resource": request_info.get("path"),
+                        "resource": request_info.get("endpoint"),
                     },
                     severity=Severity.MEDIUM,
                 )
@@ -211,11 +290,11 @@ def create_opa_agent_app():
                     source_component="opa_agent",
                     action=f"Access ALLOWED by policy",
                     trace_id=trace_id,
-                    user_id=request_info.get("user_id"),
-                    username=request_info.get("username"),
+                    user_id=request_info.get("user", {}).get("id"),
+                    username=request_info.get("user", {}).get("username"),
                     details={
                         "request_id": request_id,
-                        "resource": request_info.get("path"),
+                        "resource": request_info.get("endpoint"),
                     },
                     severity=Severity.INFO,
                 )
@@ -226,12 +305,12 @@ def create_opa_agent_app():
                     source_component="opa_agent",
                     action="Forwarding to API Server",
                     trace_id=trace_id,
-                    user_id=request_info.get("user_id"),
+                    user_id=request_info.get("user", {}).get("id"),
                     details={
                         "request_id": request_id,
                         "api_server_url": "https://localhost:5001",
                         "method": request_info.get("method"),
-                        "path": request_info.get("path"),
+                        "path": request_info.get("endpoint"),
                     },
                     severity=Severity.INFO,
                 )
@@ -246,7 +325,9 @@ def create_opa_agent_app():
                     trace_id=trace_id,
                     details={
                         "request_id": request_id,
-                        "response_status": "success" if api_response else "error",
+                        "response_status": (
+                            "success" if api_response.get("success") else "error"
+                        ),
                     },
                     severity=Severity.INFO,
                 )
@@ -312,13 +393,16 @@ def create_opa_agent_app():
 
         except Exception as e:
             logger.error(f"OPA Agent error: {e}")
+            import traceback
+
+            traceback.print_exc()
 
             # Log error event
             event_logger.log_event(
                 event_type=EventType.ERROR,
                 source_component="opa_agent",
                 action="Error processing request",
-                trace_id=trace_id if "trace_id" in locals() else "unknown",
+                trace_id=trace_id if trace_id else "unknown",
                 details={"error": str(e), "endpoint": "/evaluate"},
                 status="failure",
                 severity=Severity.HIGH,
@@ -326,9 +410,9 @@ def create_opa_agent_app():
 
             return jsonify({"error": "Processing failed", "message": str(e)}), 500
 
-    @flask_app.route("/public-key", methods=["GET"])
+    @app.route("/public-key", methods=["GET"])
     def get_public_key():
-        """Get OPA Agent's public key"""
+        """Get OPA Agent's public key - middleware handles auth"""
         # Log public key request
         trace_id = f"pubkey_{int(uuid.uuid4().int % 1000000)}"
         event_logger.log_event(
@@ -353,7 +437,7 @@ def create_opa_agent_app():
             200,
         )
 
-    return flask_app  # Return flask_app instead of app
+    return app  # Return 'app'
 
 
 if __name__ == "__main__":
@@ -369,7 +453,7 @@ if __name__ == "__main__":
     print("Press Ctrl+C to stop")
 
     # Create the Flask app
-    app = create_opa_agent_app()  # Now app is the Flask application instance
+    app = create_opa_agent_app()
 
     # Use OPA Agent specific SSL context
     try:
@@ -377,11 +461,16 @@ if __name__ == "__main__":
 
         ssl_context = create_opa_agent_ssl_context()
         print("✅ Using OPA Agent dedicated SSL certificate")
+
+        # CRITICAL: For server-side, check_hostname must be False
+        ssl_context.check_hostname = False
+
     except ImportError:
         print("⚠️ OPA Agent SSL function not found, using server SSL")
         from app.ssl_config import create_server_ssl_context
 
         ssl_context = create_server_ssl_context(verify_client=False, require_mtls=False)
+        ssl_context.check_hostname = False
     except Exception as e:
         print(f"⚠️ SSL error: {e}, falling back to default")
         import ssl
@@ -394,6 +483,7 @@ if __name__ == "__main__":
         )
         ssl_context.load_verify_locations("certs/ca.crt")
         ssl_context.verify_mode = ssl.CERT_NONE
+        ssl_context.check_hostname = False
 
     app.run(
         host="127.0.0.1",

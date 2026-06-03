@@ -95,8 +95,7 @@ def create_server_ssl_context(
 
 def create_client_ssl_context(verify_server=True, client_cert_path=None):
     """
-    Create SSL context for CLIENT applications
-    For clients, check_hostname should be True (or False if testing)
+    For SERVICE-TO-SERVICE calls (internal), enforce strict validation
     """
     if not CA_CERT.exists():
         raise FileNotFoundError(f"CA certificate not found: {CA_CERT}")
@@ -107,14 +106,9 @@ def create_client_ssl_context(verify_server=True, client_cert_path=None):
 
     context.load_verify_locations(cafile=str(CA_CERT))
 
-    if verify_server:
-        context.verify_mode = ssl.CERT_REQUIRED
-        # For client-side, we CAN enable hostname verification
-        # But for localhost with self-signed certs, we'll keep it False for now
-        context.check_hostname = False  # Keep False for local development
-    else:
-        context.verify_mode = ssl.CERT_NONE
-        context.check_hostname = False
+    # STRICT validation for internal service calls
+    context.verify_mode = ssl.CERT_REQUIRED
+    context.check_hostname = True  # Enforce hostname verification
 
     if client_cert_path and os.path.exists(client_cert_path):
         client_key = client_cert_path.with_suffix(".key")
@@ -177,8 +171,9 @@ def create_opa_agent_ssl_context():
     context.load_cert_chain(certfile=cert_file, keyfile=key_file)
     context.load_verify_locations(cafile=str(CA_CERT))
 
-    # OPA Agent doesn't require client certificates
-    context.verify_mode = ssl.CERT_NONE
+    # OPA Agent should NOT accept connections without client certs
+    # But for service-to-service, we use service tokens, not mTLS
+    context.verify_mode = ssl.CERT_NONE  # Keep as is for internal service
     context.check_hostname = False
 
     return context

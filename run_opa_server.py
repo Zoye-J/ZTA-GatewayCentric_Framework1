@@ -10,7 +10,6 @@ load_dotenv()
 import sys
 import os
 import json
-import time
 import ssl
 import traceback
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -30,13 +29,44 @@ class OPAHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/health":
-            self._send_json(
-                {
-                    "status": "healthy",
-                    "server": "OPA Policy Server",
-                    "timestamp": datetime.utcnow().isoformat(),
-                }
-            )
+            # Check for service token
+            auth_header = self.headers.get("X-Service-Token")
+            expected_token = os.environ.get("OPA_SERVICE_TOKEN")
+
+            # Only allow if token matches OR from localhost
+            client_ip = self.client_address[0]
+            is_localhost = client_ip in ["127.0.0.1", "::1"]
+
+            if expected_token and auth_header == expected_token:
+                # Valid token
+                self._send_json(
+                    {
+                        "status": "healthy",
+                        "server": "OPA Policy Server",
+                        "timestamp": datetime.utcnow().isoformat(),
+                    }
+                )
+            elif is_localhost:
+                # Localhost access (for internal calls)
+                self._send_json(
+                    {
+                        "status": "healthy",
+                        "server": "OPA Policy Server",
+                        "timestamp": datetime.utcnow().isoformat(),
+                    }
+                )
+            else:
+                # Unauthorized
+                self.send_response(401)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(
+                    json.dumps(
+                        {"error": "Unauthorized - valid service token required"}
+                    ).encode()
+                )
+            return
+
         elif self.path == "/v1/policies":
             self._send_json(
                 {"policies": ["zta/allow", "zta/time_based"], "status": "loaded"}
@@ -120,7 +150,6 @@ class OPAHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format, *args):
         """Log requests with timestamp"""
-        # Enable logging for debugging
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         message = format % args
         print(f"[{timestamp}] {self.address_string()} - {message}")

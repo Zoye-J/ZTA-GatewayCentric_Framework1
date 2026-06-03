@@ -71,11 +71,9 @@ def no_auth_required(f):
     return decorated_function
 
 
-def require_authentication(
-    f=None, allow_unauthenticated=False, require_mtls_only=False
-):
+def require_authentication(f=None, allow_unauthenticated=False):
     """
-    Decorator that REQUIRES mTLS + JWT for user endpoints
+    Decorator that REQUIRES mTLS for ALL user endpoints
     """
 
     def decorator(func):
@@ -84,141 +82,67 @@ def require_authentication(
             if allow_unauthenticated:
                 return func(*args, **kwargs)
 
-            mtls_enabled = current_app.config.get("MTLS_ENABLED", True)
-
-            # ============ STEP 1: EXTRACT AND VALIDATE mTLS ============
+            # ============ ENFORCE mTLS - NO EXCEPTIONS ============
             cert_pem = extract_client_certificate()
-            cert_valid = False
-            cert_info = None
 
-            if mtls_enabled and cert_pem:
-                from app.mTLS.cert_manager import cert_manager
-
-                # FIXED: Use validate_certificate_with_crl and store result properly
-                is_valid, validation_result = (
-                    cert_manager.validate_certificate_with_crl(
-                        cert_pem, enforce_crl=True
-                    )
+            if not cert_pem:
+                return (
+                    jsonify(
+                        {
+                            "error": "mTLS Authentication Required",
+                            "message": "This endpoint requires a valid client certificate",
+                            "code": "MTLS_REQUIRED",
+                        }
+                    ),
+                    401,
                 )
 
-                if is_valid:
-                    # validation_result contains the cert_info dict
-                    cert_info = validation_result
+            # Validate certificate with CRL
+            from app.mTLS.cert_manager import cert_manager
 
-                    # Check CRL (FIX 5) - Note: validate_certificate_with_crl already checked CRL
-                    # But we keep this as an additional check
-                    if cert_manager.is_certificate_revoked(
-                        cert_info.get("serial_number", "")
-                    ):
-                        event_logger.log_event(
-                            event_type=EventType.CLIENT_CERT_INVALID,
-                            source_component="mTLS",
-                            action="Certificate revoked",
-                            details={"serial": cert_info.get("serial_number")},
-                            severity=Severity.HIGH,
-                        )
-                        return jsonify({"error": "Certificate revoked"}), 401
+            is_valid, result = cert_manager.validate_certificate_with_crl(
+                cert_pem, enforce_crl=True
+            )
 
-                    cert_valid = True
-                    g.client_certificate = cert_info
-                    g.auth_method = "mtls"
+            if not is_valid:
+                return (
+                    jsonify(
+                        {
+                            "error": "Invalid Client Certificate",
+                            "message": str(result),
+                            "code": "INVALID_CERTIFICATE",
+                        }
+                    ),
+                    401,
+                )
 
-                    # Extract public key
-                    public_key = extract_public_key_from_cert(cert_pem)
-                    if public_key:
-                        g.client_public_key = public_key
-                else:
-                    # Validation failed - validation_result contains error message
-                    event_logger.log_event(
-                        event_type=EventType.CLIENT_CERT_INVALID,
-                        source_component="mTLS",
-                        action="Certificate validation failed",
-                        details={"error": str(validation_result)},
-                        severity=Severity.HIGH,
-                    )
-                    return (
-                        jsonify({"error": f"Certificate invalid: {validation_result}"}),
-                        401,
-                    )
+            cert_info = result
 
-            # ============ STEP 2: JWT IS NOW REQUIRED (NOT OPTIONAL) ============
-            jwt_valid = False
-            jwt_user_id = None
+            # Check revocation (already done in validate_certificate_with_crl, but double-check)
+            if cert_manager.is_certificate_revoked(cert_info.get("serial_number", "")):
+                return (
+                    jsonify(
+                        {"error": "Certificate Revoked", "code": "CERTIFICATE_REVOKED"}
+                    ),
+                    401,
+                )
 
-            try:
-                from flask_jwt_extended import verify_jwt_in_request, get_jwt_identity
+            # Store certificate info
+            g.client_certificate = cert_info
+            g.auth_method = "mtls"
 
-                verify_jwt_in_request()
-                jwt_user_id = get_jwt_identity()
-                jwt_valid = True
-                g.jwt_identity = jwt_user_id
-                g.auth_method = g.get("auth_method", "") + "+jwt"
-            except Exception as e:
-                pass
-
-            # ============ STEP 3: FOR USER ENDPOINTS, BOTH ARE REQUIRED ============
-            # Check if this is a user endpoint (not service-to-service)
-            is_service_endpoint = request.headers.get("X-Service-Token") is not None
-
-            if not is_service_endpoint:
-                # User endpoints require BOTH mTLS AND JWT
-                if not cert_valid or not jwt_valid:
-                    return (
-                        jsonify(
-                            {
-                                "error": "Zero Trust Authentication Required",
-                                "message": "This endpoint requires BOTH mTLS (client certificate) and JWT token",
-                                "mtls_received": cert_valid,
-                                "jwt_received": jwt_valid,
-                                "required": "mTLS + JWT",
-                            }
-                        ),
-                        401,
-                    )
-
-                # Verify JWT user matches certificate user
+            # Extract user from certificate
+            cert_email = cert_info.get("subject", {}).get("emailAddress", "")
+            if cert_email:
                 try:
                     from app.models.user import User
 
-                    user = User.query.get(jwt_user_id)
-                    cert_email = cert_info.get("subject", {}).get("emailAddress", "")
-
-                    if user and user.email != cert_email:
-                        event_logger.log_event(
-                            event_type=EventType.SECURITY_VIOLATION,
-                            source_component="mTLS",
-                            action="JWT/certificate mismatch",
-                            user_id=jwt_user_id,
-                            details={"jwt_user": user.email, "cert_email": cert_email},
-                            severity=Severity.HIGH,
-                        )
-                        return (
-                            jsonify(
-                                {
-                                    "error": "Identity Mismatch",
-                                    "message": "JWT identity does not match certificate",
-                                }
-                            ),
-                            401,
-                        )
-
-                    g.current_user = user
-
+                    user = User.query.filter_by(email=cert_email).first()
+                    if user:
+                        g.current_user = user
+                        g.jwt_identity = user.id  # For compatibility
                 except Exception as e:
-                    current_app.logger.error(f"User validation failed: {e}")
-
-            else:
-                # Service endpoints: mTLS only is sufficient
-                if not cert_valid:
-                    return (
-                        jsonify(
-                            {
-                                "error": "Service Authentication Required",
-                                "message": "Service-to-service requests require valid mTLS certificate",
-                            }
-                        ),
-                        401,
-                    )
+                    current_app.logger.error(f"User lookup failed: {e}")
 
             return func(*args, **kwargs)
 

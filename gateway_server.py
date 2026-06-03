@@ -19,11 +19,12 @@ except ImportError:
 
 import sys
 import os
-from flask import render_template, g
+from flask import redirect, render_template, g
 from app.mTLS.middleware import require_authentication
 from datetime import datetime
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+from app.mTLS.conditional_mtls import require_mtls_for_api
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -35,11 +36,12 @@ from app.gateway_app import create_gateway_app
 
 # Import centralized SSL config
 try:
-    from app.ssl_config import create_ssl_context
+    from app.ssl_config import create_server_ssl_context
 
     HAS_SSL_CONFIG = True
 except ImportError:
     HAS_SSL_CONFIG = False
+    print("⚠️ Could not import create_server_ssl_context from ssl_config")
 
 limiter = Limiter(key_func=get_remote_address)
 
@@ -90,103 +92,90 @@ def public_opa_agent_key():
 @app.route("/api/<path:subpath>", methods=["GET", "POST", "PUT", "DELETE"])
 def gateway_proxy(subpath):
     """
-    Gateway endpoint - uses encrypted flow for everything
-    Authenticates client and forwards through OPA Agent
+    Gateway endpoint - Use JWT for users, mTLS only for service-to-service
     """
     try:
-        # For now, we'll handle authentication directly here
-        from app.mTLS.middleware import (
-            extract_client_certificate,
-            require_authentication,
-        )
         from flask_jwt_extended import verify_jwt_in_request, get_jwt_identity
 
-        user_claims = None
+        # ============ PUBLIC ENDPOINTS (no auth) ============
+        public_endpoints = [
+            "auth/login",
+            "auth/register",
+            "health",
+            "opa-agent-public-key",
+        ]
+        is_public = any(subpath.startswith(ep) for ep in public_endpoints)
 
-        # Try JWT first
-        try:
-            verify_jwt_in_request(optional=True)
-            user_id = get_jwt_identity()
-            if user_id:
-                from app.models.user import User
-
-                user = User.query.get(user_id)
-                if user:
-                    user_claims = {
-                        "sub": user.id,
-                        "username": user.username,
-                        "email": user.email,
-                        "user_class": user.user_class,
-                        "facility": user.facility,
-                        "department": user.department,
-                        "clearance_level": user.clearance_level,
-                        "auth_method": "JWT",
-                    }
-                    g.auth_method = "jwt"
-                    g.jwt_identity = user_id
-        except:
-            pass
-
-        # Try mTLS if JWT failed
-        if not user_claims:
-            cert_pem = extract_client_certificate()
-            if cert_pem:
-                from app.mTLS.cert_manager import cert_manager
-
-                is_valid, cert_info = cert_manager.validate_certificate(cert_pem)
-                if is_valid:
-                    # Find user by certificate
-                    from app.models.user import User
-
-                    fingerprint = cert_info.get("fingerprint")
-                    if fingerprint:
-                        user = User.find_by_certificate_fingerprint(fingerprint)
-                        if user:
-                            user_claims = {
-                                "sub": user.id,
-                                "username": user.username,
-                                "email": user.email,
-                                "user_class": user.user_class,
-                                "facility": user.facility,
-                                "department": user.department,
-                                "clearance_level": user.clearance_level,
-                                "auth_method": "mTLS",
-                            }
-                            g.auth_method = "mtls"
-                            g.client_certificate = cert_info
-
-        if not user_claims:
-            return jsonify({"error": "Authentication required"}), 401
-
-        # Use REAL service communicator to process request
-        result = process_encrypted_request(request, user_claims)
-
-        # Check if this is an encrypted response
-        if isinstance(result, tuple):
-            response_data, status_code = result
-            if hasattr(response_data, "json"):
-                try:
-                    json_data = response_data.get_json()
-                    # If it's encrypted, return as-is
-                    if json_data and "encrypted_response" in json_data:
-                        return response_data, status_code
-                except:
-                    pass
+        if is_public:
+            result = process_encrypted_request(request, {})
+            if isinstance(result, tuple):
+                response_data, status_code = result
+                return response_data, status_code
             return result
 
-        return result
+        # ============ USER ENDPOINTS (JWT authentication) ============
+        try:
+            verify_jwt_in_request()
+            user_id = get_jwt_identity()
+
+            if not user_id:
+                return jsonify({"error": "Invalid or expired token"}), 401
+
+            from app.models.user import User
+
+            user = User.query.get(user_id)
+
+            if not user:
+                return jsonify({"error": "User not found"}), 401
+
+            user_claims = {
+                "sub": user.id,
+                "username": user.username,
+                "email": user.email,
+                "user_class": user.user_class,
+                "facility": user.facility,
+                "department": user.department,
+                "clearance_level": user.clearance_level,
+                "auth_method": "JWT",
+            }
+
+            # Process request with user claims
+            result = process_encrypted_request(request, user_claims)
+
+            if isinstance(result, tuple):
+                response_data, status_code = result
+                if hasattr(response_data, "json"):
+                    try:
+                        json_data = response_data.get_json()
+                        if json_data and "encrypted_response" in json_data:
+                            return response_data, status_code
+                    except:
+                        pass
+                return result
+
+            return result
+
+        except Exception as jwt_error:
+            return (
+                jsonify(
+                    {
+                        "error": "Authentication required",
+                        "message": "Valid JWT token required",
+                        "code": "JWT_REQUIRED",
+                    }
+                ),
+                401,
+            )
 
     except Exception as e:
-        return (
-            jsonify(
-                {
-                    "error": "Gateway processing failed",
-                    "message": str(e),
-                    "zta_context": {"server": "gateway"},
-                }
-            ),
-            500,
-        )
+        return jsonify({"error": "Gateway processing failed", "message": str(e)}), 500
+
+
+# Keep login page without mTLS
+@app.route("/login")
+def login_page():
+    """Login page - no mTLS required"""
+    return render_template("login.html")
 
 
 @app.route("/resources/<int:resource_id>/view")
@@ -394,20 +383,23 @@ if __name__ == "__main__":
 
     # Setup SSL context using centralized config
     if HAS_SSL_CONFIG:
-        # Use centralized SSL config for Python 3.13 compatibility
-        context = create_ssl_context(
-            verify_client=True
-        )  # Enable client verification for mTLS
+
+        # CERT_OPTIONAL allows login without certificate
+        # But our decorator will enforce mTLS for API endpoints
+        context = create_server_ssl_context(
+            verify_client=True,  # Request certificate if available
+            require_mtls=False,  # Don't REQUIRE it for connection
+        )
     else:
-        # Fallback to old method
         import ssl
 
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        context.minimum_version = ssl.TLSVersion.TLSv1_2  # Fix for Python 3.13
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
         context.maximum_version = ssl.TLSVersion.TLSv1_2
         context.load_cert_chain("certs/server.crt", "certs/server.key")
         context.load_verify_locations("certs/ca.crt")
-        context.verify_mode = ssl.CERT_OPTIONAL
+        context.verify_mode = ssl.CERT_OPTIONAL  # ← Request but don't require
+        context.check_hostname = False
 
     # ============ ADD PRE-WARMING ============
     import threading

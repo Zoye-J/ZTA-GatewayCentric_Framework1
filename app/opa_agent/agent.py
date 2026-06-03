@@ -435,6 +435,8 @@ class OpaAgent:
 
     def health_check(self):
         """Check health of OPA Agent dependencies"""
+        import os
+
         health = {
             "agent": "running",
             "opa_server": "unknown",
@@ -442,23 +444,26 @@ class OpaAgent:
             "encryption": "available",
         }
 
-        # Check OPA Server
+        # Check OPA Server with service token
         try:
-            response = requests.get(f"{self.opa_url}/health", timeout=3)
+            headers = {"X-Service-Token": os.environ.get("OPA_SERVICE_TOKEN", "")}
+            response = requests.get(
+                f"{self.opa_url}/health", headers=headers, timeout=3
+            )
             health["opa_server"] = (
                 "healthy" if response.status_code == 200 else "unhealthy"
             )
         except:
             health["opa_server"] = "unreachable"
 
-        # Check API Server
+        # Check API Server with service token
         try:
+            headers = {"X-Service-Token": os.environ.get("API_SERVICE_TOKEN", "")}
             response = requests.get(
                 f"{self.api_server_url}/health",
+                headers=headers,
                 timeout=3,
-                verify="/path/to/certs/ca.crt",
             )
-
             health["api_server"] = (
                 "healthy" if response.status_code == 200 else "unhealthy"
             )
