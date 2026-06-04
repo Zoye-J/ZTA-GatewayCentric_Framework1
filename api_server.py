@@ -44,10 +44,13 @@ if __name__ == "__main__":
         # Fallback
         ssl_context = ("certs/server.crt", "certs/server.key")
 
+    # app.run(debug=True,host="127.0.0.1",port=app.config.get("API_SERVER_PORT", 5001),ssl_context=ssl_context,use_reloader=False, )
+
+    # for testing with external access, use
     app.run(
         debug=True,
-        host="127.0.0.1",
+        host="0.0.0.0",
         port=app.config.get("API_SERVER_PORT", 5001),
         ssl_context=ssl_context,
-        use_reloader=False,  # Add this to prevent socket issues
+        use_reloader=False,
     )

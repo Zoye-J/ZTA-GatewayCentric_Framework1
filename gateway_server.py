@@ -437,4 +437,7 @@ if __name__ == "__main__":
     threading.Thread(target=prewarm_connections, daemon=True).start()
     # ============ END PRE-WARMING ============
     # Run with proper SSL + mTLS
-    app.run(host="127.0.0.1", port=5000, ssl_context=context, debug=True)
+    # app.run(host="127.0.0.1", port=5000, ssl_context=context, debug=True)
+
+    # for testing with external access, use
+    app.run(host="0.0.0.0", port=5000, ssl_context=context, debug=True)

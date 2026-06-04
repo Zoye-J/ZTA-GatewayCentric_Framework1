@@ -485,8 +485,11 @@ if __name__ == "__main__":
         ssl_context.verify_mode = ssl.CERT_NONE
         ssl_context.check_hostname = False
 
+    # app.run(host="127.0.0.1",port=8282,ssl_context=ssl_context,debug=True,extra_files=["app/opa_agent/agent.py", "app/ssl_config.py"],)
+
+    # for testing with external access, use
     app.run(
-        host="127.0.0.1",
+        host="0.0.0.0",
         port=8282,
         ssl_context=ssl_context,
         debug=True,
