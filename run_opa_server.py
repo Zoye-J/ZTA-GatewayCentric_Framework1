@@ -157,7 +157,7 @@ class OPAHandler(BaseHTTPRequestHandler):
 
 def run_opa_server():
     """Run OPA policy server with SSL - FIXED"""
-    host = "localhost"
+    host = "0.0.0.0"
     port = 8181
 
     # ============ SSL CONTEXT ============
